@@ -1,0 +1,7 @@
+{
+  "username": "2023000000",
+  "password_dpapi": "（这里应该是加密串，不要手填；请运行 python witkeep.py --set-password 自动生成）",
+  "isp": "ctcc",
+  "interval": 30,
+  "portal_api": "https://login.wit.edu.cn/api"
+}
