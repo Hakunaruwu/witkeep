@@ -6,6 +6,8 @@
 
 用法：
   python witkeep.py --set-password          # 首次：录入账号密码（DPAPI 加密存盘）
+  python witkeep.py --set-password --machine # 同上，但用机器作用域（系统任务/服务需要）
+  python witkeep.py --migrate-machine       # 把已存的用户作用域密文转成机器作用域
   python witkeep.py --isp ctcc              # 设置运营商 cmcc/ctcc/cucc/local
   python witkeep.py --check                 # 单次体检，打印当前状态
   python witkeep.py                         # 前台常驻（Ctrl+C 退出）
@@ -58,22 +60,26 @@ def _mkblob(data):
     buf = ctypes.create_string_buffer(data, len(data))
     return _BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), buf
 
-def dpapi_protect(data):
+CRYPTPROTECT_LOCAL_MACHINE = 0x4  # 机器作用域：本机所有账户（含 SYSTEM）都能解
+
+def dpapi_protect(data, machine=False):
     src, _k = _mkblob(data)
     out = _BLOB()
+    flags = CRYPTPROTECT_LOCAL_MACHINE if machine else 0
     if not ctypes.windll.crypt32.CryptProtectData(
-            ctypes.byref(src), None, None, None, None, 0, ctypes.byref(out)):
+            ctypes.byref(src), None, None, None, None, flags, ctypes.byref(out)):
         raise OSError(ctypes.get_last_error(), "CryptProtectData failed")
     try:
         return ctypes.string_at(out.pbData, out.cbData)
     finally:
         ctypes.windll.kernel32.LocalFree(out.pbData)
 
-def dpapi_unprotect(blob):
+def dpapi_unprotect(blob, machine=False):
     src, _k = _mkblob(blob)
     out = _BLOB()
+    flags = CRYPTPROTECT_LOCAL_MACHINE if machine else 0
     if not ctypes.windll.crypt32.CryptUnprotectData(
-            ctypes.byref(src), None, None, None, None, 0, ctypes.byref(out)):
+            ctypes.byref(src), None, None, None, None, flags, ctypes.byref(out)):
         raise OSError(ctypes.get_last_error(), "CryptUnprotectData failed")
     try:
         return ctypes.string_at(out.pbData, out.cbData)
@@ -84,6 +90,7 @@ def dpapi_unprotect(blob):
 DEFAULTS = {
     "username": "",
     "password_dpapi": "",
+    "dpapi_scope": "user",   # user=仅本机本用户可解；machine=本机任何账户可解（系统服务需要）
     "isp": "ctcc",
     "interval": 30,
     "portal_api": PORTAL_API,
@@ -107,11 +114,15 @@ def get_password(cfg):
     blob = cfg.get("password_dpapi") or ""
     if not blob:
         return None
-    try:
-        return dpapi_unprotect(base64.b64decode(blob)).decode("utf-8")
-    except Exception as e:
-        log(f"密码解密失败（换机器/换用户会这样）: {e!r}")
-        return None
+    raw = base64.b64decode(blob)
+    declared = cfg.get("dpapi_scope") or "user"
+    for sc in [declared] + [s for s in ("user", "machine") if s != declared]:
+        try:
+            return dpapi_unprotect(raw, machine=(sc == "machine")).decode("utf-8")
+        except Exception:
+            continue
+    log("密码解密失败（换机器/换用户会这样），请重新 --set-password")
+    return None
 
 # ---------------------------------------------------------------- HTTP
 def make_opener():
@@ -346,8 +357,10 @@ def run_daemon(cfg):
         time.sleep(max(5, int(wait)))
 
 # ---------------------------------------------------------------- CLI
-def cmd_set_password(cfg):
-    print("首次配置：账号密码只在本机加密保存（Windows DPAPI，绑定当前用户）。")
+def cmd_set_password(cfg, machine=False):
+    scope = "machine" if machine else "user"
+    hint = "本机任何账户都能解（系统任务/服务需要）" if machine else "只有本机本用户能解"
+    print(f"配置账号密码：DPAPI {scope} 作用域，{hint}。")
     u = input(f"账号（默认 {cfg['username'] or '无'}）: ").strip() or cfg["username"]
     import getpass
     p = getpass.getpass("密码: ")
@@ -355,10 +368,30 @@ def cmd_set_password(cfg):
         print("账号或密码为空，已取消")
         return 1
     cfg["username"] = u
-    cfg["password_dpapi"] = base64.b64encode(dpapi_protect(p.encode("utf-8"))).decode()
+    cfg["password_dpapi"] = base64.b64encode(
+        dpapi_protect(p.encode("utf-8"), machine=machine)).decode()
+    cfg["dpapi_scope"] = scope
     save_config(cfg)
     print(f"已保存到 {CONF}")
     print("可以运行 --check 验证一下")
+    return 0
+
+def cmd_migrate_machine(cfg):
+    """把已有的 user 作用域密文就地转成 machine 作用域（需以本用户身份运行，可提权）"""
+    blob = cfg.get("password_dpapi") or ""
+    if not blob:
+        print("没有已保存的密码，先运行 --set-password")
+        return 1
+    try:
+        pw = dpapi_unprotect(base64.b64decode(blob), machine=False).decode("utf-8")
+    except Exception as e:
+        print(f"用 user 作用域解不开: {e!r}")
+        return 1
+    cfg["password_dpapi"] = base64.b64encode(dpapi_protect(pw.encode("utf-8"), machine=True)).decode()
+    cfg["dpapi_scope"] = "machine"
+    save_config(cfg)
+    del pw
+    print(f"已转为 machine 作用域并写回 {CONF}")
     return 0
 
 def cmd_login(cfg):
@@ -438,6 +471,10 @@ def cmd_uninstall(cfg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--set-password", action="store_true")
+    ap.add_argument("--machine", action="store_true",
+                    help="配合 --set-password：改用机器作用域加密（系统任务/服务需要）")
+    ap.add_argument("--migrate-machine", action="store_true",
+                    help="把已保存的 user 作用域密文就地转成 machine 作用域")
     ap.add_argument("--isp", choices=["cmcc", "ctcc", "cucc", "local"],
                     help="运营商：cmcc=移动 ctcc=电信 cucc=联通 local=校园网")
     ap.add_argument("--check", action="store_true")
@@ -453,7 +490,9 @@ def main():
         print(f"已设置运营商: {a.isp}")
         return 0
     if a.set_password:
-        return cmd_set_password(cfg)
+        return cmd_set_password(cfg, machine=a.machine)
+    if a.migrate_machine:
+        return cmd_migrate_machine(cfg)
     if a.check:
         return cmd_check(cfg)
     if a.login:

@@ -94,6 +94,32 @@ python witkeep.py
 
 或者去任务管理器结束掉旧的 `pythonw.exe`，再重新登录一次 Windows 让自启重新拉起。
 
+> 这条自启是**跟人走的**：只有你登录进桌面才会启动。停在登录界面、或者开机后没登录，它不会跑。
+
+### 5. 开机自启（不登录也跑，进阶）
+
+如果你要的是「开机就活，不管有没有人登录」，得用系统级计划任务，需要管理员：
+
+```powershell
+# 右键「以管理员身份运行」PowerShell，然后
+.\install-task.ps1
+```
+
+它会做四件事：
+
+1. 把程序和配置搬到 `C:\ProgramData\witkeep\`（不受你误删桌面文件的影响）
+2. 把密码转成**机器作用域** DPAPI 加密（`dpapi_scope: "machine"`）
+3. 注册计划任务 `WITKeep`：开机 30 秒后以 **SYSTEM** 身份启动，失败 3 次内每 2 分钟重试
+4. 顺手删掉旧的那条 HKCU Run，避免两套同时跑
+
+卸载：
+
+```powershell
+.\install-task.ps1 -Uninstall
+```
+
+**代价要说清楚**：机器作用域加密意味着**本机任何账户**都能解开这个密码；相比用户作用域（只有你自己能解）安全性降低。自己一个人的电脑无所谓，多人共用的机器建议只用第 4 步的用户级自启。
+
 ---
 
 ## 命令行一览
@@ -102,6 +128,8 @@ python witkeep.py
 | --- | --- |
 | `python witkeep.py` | 前台常驻运行，`Ctrl+C` 退出 |
 | `python witkeep.py --set-password` | 录入/修改账号密码 |
+| `python witkeep.py --set-password --machine` | 同上，但用机器作用域加密（给系统任务用） |
+| `python witkeep.py --migrate-machine` | 把已有的用户作用域密码就地转成机器作用域 |
 | `python witkeep.py --isp ctcc` | 设置运营商（cmcc/ctcc/cucc/local） |
 | `python witkeep.py --check` | 体检一次，打印当前网络状态 |
 | `python witkeep.py --login` | 只尝试登录一次就退出（不想挂常驻时用） |
@@ -174,6 +202,7 @@ python witkeep.py --uninstall
 | 文件 | 说明 |
 | --- | --- |
 | `witkeep.py` | 全部代码，单文件，无第三方依赖 |
+| `install-task.ps1` | 注册/卸载系统级开机任务（需管理员） |
 | `config.json` | 你的账号 + 加密后的密码（**首次运行后才生成，不要上传给别人**） |
 | `witkeep.log` | 运行日志 |
 
